@@ -1,4 +1,5 @@
 import base64
+import time
 
 import requests
 
@@ -18,7 +19,10 @@ HELIUS_RPC = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 # --- TRANSACTION DETAILS ---
 BUY_AMOUNT_LAMPORTS = 1000000
 INPUT_MINT = 'So11111111111111111111111111111111111111112'
-OUTPUT_MINT = '6AJcP7wuLwmRYLBNbi825wgguaPsWzPBEHcHndpRpump'
+# OUTPUT_MINT = '6AJcP7wuLwmRYLBNbi825wgguaPsWzPBEHcHndpRpump'
+OUTPUT_MINT = '9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump'
+# OUTPUT_MINT = 'oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp'  # can mint
+# OUTPUT_MINT = 'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE'
 SLIPPAGE_BPS = 500
 
 # Private key (64 integers, 0-255). Export from Solflare via Settings > Export Private Key
@@ -54,7 +58,7 @@ def check_authorities(mint_str):
     freeze_auth = mint_parsed.get("freezeAuthority")
 
     if mint_auth:
-        print(f"⚠️  Mint Authority: {mint_auth}")
+        print(f"Mint Authority: {mint_auth}")
         if mint_auth == user_public_key:
             print("    -> It's YOU! (renounced or self-owned)")
         else:
@@ -63,7 +67,7 @@ def check_authorities(mint_str):
         print("Mint Authority: None (no one can mint new tokens)")
 
     if freeze_auth:
-        print(f"⚠️  Freeze Authority: {freeze_auth}")
+        print(f"Freeze Authority: {freeze_auth}")
         if freeze_auth == user_public_key:
             print("    -> It's YOU!")
         else:
@@ -113,6 +117,178 @@ def sign_tx(tx_b64, private_key_list):
     return signed_tx_b64
 
 
+# --- POOL LIQUIDITY ANALYSIS ---
+def read_pubkey(data, offset):
+    return str(Pubkey.from_bytes(data[offset:offset+32]))
+
+
+def analyze_pools(quote_data, output_mint):
+    route = quote_data.get("routePlan", [])
+    if not route:
+        return
+
+    BURN_ADDR = "11111111111111111111111111111111"
+    SOL_MINT = "So11111111111111111111111111111111111111112"
+    RAYDIUM_AMM_V4 = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+
+    print("\n" + "=" * 60)
+    print("Pool Liquidity Analysis")
+    print("=" * 60)
+
+    for idx, step in enumerate(route):
+        info = step.get("swapInfo", {})
+        pool_addr = info.get("ammKey")
+        dex = info.get("label", "Unknown")
+        if not pool_addr:
+            continue
+
+        print(f"\nPool {idx+1}: {pool_addr}")
+        print(f"DEX:     {dex}")
+
+        acc = rpc_call("getAccountInfo", [pool_addr, {"encoding": "base64"}])
+        if "result" not in acc or not acc["result"]["value"]:
+            print(f"  Could not fetch pool: {acc.get('error')}")
+            continue
+        val = acc["result"]["value"]
+        owner = val.get("owner", "")
+        print(f"Program: {owner}")
+
+        raw_base64 = val["data"][0]
+        raw = base64.b64decode(raw_base64)
+
+        lp_mint = None
+        vault_a = None
+        vault_b = None
+        reserves = {}
+
+        if owner == RAYDIUM_AMM_V4 and len(raw) >= 400:
+            # Search for known mint addresses in the raw data
+            def find_mint(data, mint_str):
+                mint_bytes = bytes(Pubkey.from_string(mint_str))
+                pos = data.find(mint_bytes)
+                return pos
+
+            sol_pos = find_mint(raw, SOL_MINT)
+            out_pos = find_mint(raw, output_mint)
+
+            if sol_pos >= 0 and out_pos >= 0:
+                # Found both mints in the data. Determine which is coin and which is pc.
+                # coin_mint is typically at a lower offset than pc_mint in the pool struct
+                coin_mint_offset = min(sol_pos, out_pos)
+                pc_mint_offset = max(sol_pos, out_pos)
+                # Pubkey order: vault_a, vault_b, coin_mint, pc_mint, lp_mint
+                # So vaults are 64 bytes before coin_mint
+                vault_a_pos = coin_mint_offset - 64
+                vault_b_pos = coin_mint_offset - 32
+                lp_mint_pos = pc_mint_offset + 32
+
+                if vault_a_pos >= 0 and vault_b_pos >= 0 and lp_mint_pos + 32 <= len(raw):
+                    vault_a = read_pubkey(raw, vault_a_pos)
+                    vault_b = read_pubkey(raw, vault_b_pos)
+                    coin_mint = read_pubkey(raw, coin_mint_offset)
+                    pc_mint = read_pubkey(raw, pc_mint_offset)
+                    lp_mint = read_pubkey(raw, lp_mint_pos)
+
+                    for label, vault_addr in [("Vault A", vault_a), ("Vault B", vault_b)]:
+                        va_info = rpc_call("getAccountInfo", [vault_addr, {"encoding": "jsonParsed"}])
+                        if "result" in va_info and va_info["result"]["value"]:
+                            d = va_info["result"]["value"].get("data", [])
+                            if isinstance(d, dict) and d.get("program") == "spl-token":
+                                parsed = d["parsed"]["info"]
+                                mint = parsed["mint"]
+                                amt = int(parsed["tokenAmount"]["amount"])
+                                dec = parsed["tokenAmount"]["decimals"]
+                                ui = amt / (10**dec)
+                                lbl = "OUTPUT" if mint == output_mint else ("WSOL" if mint == SOL_MINT else f"{mint[:8]}...")
+                                print(f"  {lbl}: {ui:,.4f}")
+                                reserves[mint] = {"ui": ui, "raw": amt, "decimals": dec}
+                else:
+                    print(f"  Could not determine vault positions from mint locations")
+                    lp_mint = None
+            else:
+                print(f"  Mint addresses not found in pool data — pool may be non-standard")
+                lp_mint = None
+        else:
+            # Non-Raydium: try getTokenAccountsByOwner
+            vaults = rpc_call("getTokenAccountsByOwner", [
+                pool_addr,
+                {"programId": TOKEN_PROGRAM_ID},
+                {"encoding": "jsonParsed"}
+            ])
+            if "result" in vaults and vaults["result"]["value"]:
+                for va in vaults["result"]["value"]:
+                    p = va["account"]["data"]["parsed"]["info"]
+                    mint = p["mint"]
+                    amt = int(p["tokenAmount"]["amount"])
+                    dec = p["tokenAmount"]["decimals"]
+                    ui = amt / (10**dec)
+                    lbl = "OUTPUT" if mint == output_mint else ("WSOL" if mint == SOL_MINT else f"{mint[:8]}...")
+                    print(f"  {lbl}: {ui:,.4f}")
+                    reserves[mint] = {"ui": ui, "raw": amt, "decimals": dec}
+                    if not lp_mint and mint != output_mint and mint != SOL_MINT:
+                        lp_mint = mint
+            else:
+                # Last resort: check if pool address itself is a token mint
+                mc = rpc_call("getAccountInfo", [pool_addr, {"encoding": "jsonParsed"}])
+                if "result" in mc and mc["result"]["value"]:
+                    d = mc["result"]["value"].get("data", {})
+                    if isinstance(d, dict) and d.get("program") == "spl-token":
+                        lp_mint = pool_addr
+
+        if lp_mint:
+            sr = rpc_call("getTokenSupply", [lp_mint])
+            total_raw = 0
+            lpd = 0
+            if "result" in sr and sr["result"]["value"]:
+                total_raw = int(sr["result"]["value"]["amount"])
+                lpd = sr["result"]["value"]["decimals"]
+
+            br = rpc_call("getTokenAccountsByOwner", [
+                BURN_ADDR,
+                {"mint": lp_mint},
+                {"encoding": "jsonParsed"}
+            ])
+            burned_raw = 0
+            if "result" in br:
+                for ba in br["result"]["value"]:
+                    burned_raw += int(ba["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"])
+
+            total_lp = total_raw / (10**lpd)
+            burned_lp = burned_raw / (10**lpd)
+            bpct = burned_lp / total_lp * 100 if total_lp > 0 else 0
+            print(f"  LP Supply: {total_lp:,.2f}  Burned: {burned_lp:,.2f} ({bpct:.1f}%)")
+
+            # Top LP holders
+            lo = rpc_call("getTokenLargestAccounts", [lp_mint])
+            if "result" in lo:
+                top3_pct = 0
+                for entry in lo["result"]["value"][:3]:
+                    if entry["address"] == BURN_ADDR:
+                        continue
+                    op = int(entry["amount"]) / total_raw * 100
+                    top3_pct += op
+                    print(f"  LP Holder {entry['address'][:12]}...: {op:.1f}%")
+                if top3_pct > 80:
+                    print(f"  ⚠️  Top 3 LP holders own {top3_pct:.0f}% of LP (concentrated liquidity)")
+        else:
+            print(f"  LP Mint: pool is not an SPL token — cannot check burn ratio")
+
+        # Creation time
+        sigs = rpc_call("getSignaturesForAddress", [pool_addr, {"limit": 50}])
+        if "result" in sigs and sigs["result"]:
+            oldest = sigs["result"][-1]
+            slot = oldest.get("slot", 0)
+            bt = rpc_call("getBlockTime", [slot])
+            if "result" in bt:
+                from datetime import datetime
+                ts = datetime.fromtimestamp(bt["result"])
+                print(f"  Created:  {ts.strftime('%Y-%m-%d %H:%M:%S')}  slot={slot}")
+            else:
+                print(f"  Created:  slot={slot} (block time unavailable)")
+        else:
+            print(f"  Created:  (no transaction history found)")
+
+
 # --- MAIN ---
 def main():
     print("=" * 60)
@@ -133,6 +309,12 @@ def main():
     if estimated_out_amount == 0:
         print("Buy results in 0 tokens, stopping.")
         return
+
+    # 3) Pool liquidity analysis
+    analyze_pools(buy_quote, OUTPUT_MINT)
+
+    print("\nWaiting 5 seconds before simulation (rate limit cooldown)...")
+    time.sleep(5)
 
     sell_tx_b64, sell_quote = get_jupiter_swap_transaction(OUTPUT_MINT, INPUT_MINT, estimated_out_amount, user_public_key, SLIPPAGE_BPS)
     if not sell_tx_b64: return
