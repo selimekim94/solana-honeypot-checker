@@ -1,18 +1,23 @@
 # Solana Token Honeypot Checker
 
-Tools to check honeypot tokens on Solana. Features buy/sell tax detection via Helius bundle simulation, Mint/Freeze authority checks, and holder-level sell restriction analysis using Jupiter + SurfPool.
+Tools to check honeypot tokens on Solana. Features buy/sell tax detection via Helius bundle simulation, Mint/Freeze authority checks, pool liquidity analysis (reserves, LP burn ratio, creation time, LP holder concentration), and holder-level sell restriction analysis using Jupiter + SurfPool.
 
 ## Scripts
 
-### 1. `solana_honeypot.py` — Buy + Sell Bundle + Authority Checks
+### 1. `solana_honeypot.py` — Buy + Sell Bundle + Authority Checks + Pool Analysis
 
-Simulates a buy and sell pair via Helius `simulateBundle`. Detects buy/sell taxes and checks token mint/freeze authorities via `getAccountInfo`.
+Simulates a buy and sell pair via Helius `simulateBundle`. Detects buy/sell taxes, checks token mint/freeze authorities, and analyzes pool liquidity (reserves, LP burn ratio, creation time, LP holder concentration).
 
 **Features:**
 - Bundle simulation (buy + sell in same block)
 - Mint Authority detection (can creator mint unlimited tokens?)
 - Freeze Authority detection (can creator freeze wallets?)
 - Buy/sell tax calculation from `postTokenBalances` and native SOL balance change
+- **Pool liquidity analysis** (per pool in the swap route):
+  - Vault reserve amounts (token + SOL liquidity in the pool)
+  - LP token total supply and burned amount (burn ratio)
+  - Creation time and slot number
+  - Top 3 LP holders with ownership percentage (detect concentrated/fake liquidity)
 
 **Usage:**
 ```bash
@@ -97,10 +102,14 @@ pip install -r requirements.txt
 ### `solana_honeypot.py`
 1. Checks **Mint Authority** and **Freeze Authority** via Helius `getAccountInfo` with `jsonParsed`
 2. Fetches buy quote and builds swap transaction via Jupiter API (`api.jup.ag/swap/v1`)
-3. Signs both buy and sell transactions with your private key
-4. Sends both as a bundle to Helius `simulateBundle`
-5. Extracts actual buy amount from `postTokenBalances` and actual sell amount from native SOL balance change
-6. Calculates buy/sell taxes
+3. **Pool liquidity analysis** — for each pool in Jupiter's route plan:
+   - **Raydium**: parses pool account raw data (binary search for known mint addresses) to extract vault addresses, LP mint, and creation signature
+   - **Other DEXes** (Meteora DLMM, Orca Whirlpool, etc.): fetches token accounts owned by the pool via `getTokenAccountsByOwner`
+   - Displays vault reserve balances, LP supply & burn ratio, creation time/slot, and top 3 LP holders
+4. Signs both buy and sell transactions with your private key
+5. Sends both as a bundle to Helius `simulateBundle`
+6. Extracts actual buy amount from `postTokenBalances` and actual sell amount from native SOL balance change
+7. Calculates buy/sell taxes
 
 ### `solana-holders-analysis.py`
 1. Fetches top 20 token accounts via Helius `getTokenLargestAccounts`
