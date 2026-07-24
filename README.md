@@ -15,7 +15,7 @@ Shared: `.env` loading (`env_loader.py`), Helius/Jupiter APIs.
 
 ### 1. `solana_honeypot.py`
 
-Mainnet-only check (Helius or any Solana RPC). **Does not use Surfpool.**
+Mainnet-only check (Helius). **Does not use Surfpool.**
 
 **Features:**
 - Mint / freeze authority
@@ -41,7 +41,7 @@ python solana_honeypot.py
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `HELIUS_API_KEY` | Helius key | — (or use `SOLANA_RPC`) |
+| `HELIUS_API_KEY` | Helius key |
 | `SOLANA_RPC` | Full RPC URL | built from Helius key if set |
 | `OUTPUT_MINT` | Token mint to test | sample mint in code |
 | `BUY_LAMPORTS` | Buy size in lamports | `1000000` (0.001 SOL) |
@@ -91,7 +91,7 @@ python solana-holders-analysis.py
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `HELIUS_API_KEY` / `SOLANA_RPC` | Mainnet read RPC | — |
+| `HELIUS_API_KEY` | Mainnet read RPC | — |
 | `LOCAL_RPC` | Surfpool URL | `http://127.0.0.1:8899` |
 | `OUTPUT_MINT` | Token mint | — |
 | `TOP_N` | Largest accounts to list | `20` |
@@ -110,7 +110,7 @@ python solana-holders-analysis.py
 ## Requirements
 
 - **Python 3.9+**
-- **Helius** (or any Solana RPC) — https://dev.helius.xyz  
+- **Helius** — https://dev.helius.xyz  
 - **Jupiter** — https://api.jup.ag (optional API key)  
 - **Surfpool** — only for holder sell sims — https://surfpool.run  
 
